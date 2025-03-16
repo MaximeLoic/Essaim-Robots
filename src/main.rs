@@ -23,6 +23,18 @@ struct Robot {
     turn_speed: f32, // Vitesse de rotation
 }
 
+#[derive(Clone, Copy)]
+enum ResourceType {
+    Energy,
+    Mineral,
+    Scientific,
+}
+
+#[derive(Component)]
+struct Resource {
+    resource_type: ResourceType,
+    consumed: bool,
+}
 #[derive(Component)]
 
 struct Map {
@@ -30,6 +42,7 @@ struct Map {
     height: u32, // Number of tiles in the y-axis
     tile_size: u32,
     noise_map: Vec<f64>,
+    resources: Vec<Option<ResourceType>>
 }
 
 impl Map {
@@ -39,19 +52,34 @@ impl Map {
             height,
             tile_size,
             noise_map: vec![0.0; width as usize * height as usize],
+            resources: vec![None; width as usize * height as usize],
         }
     }
 
     fn from_perlin_noise(width: u32, height: u32, tile_size: u32, seed: u32, scale: f64) -> Self {
         let mut map = Self::new(width, height, tile_size);
         let perlin = Perlin::new(seed);
+        let mut rng = rand::thread_rng();
 
         for y in 0..height {
             for x in 0..width {
                 let nx = (x as f64 / width as f64) * scale;
                 let ny = (y as f64 / height as f64) * scale;
 
-                map.noise_map[(y * width + x) as usize] = perlin.get([nx, ny]);
+                let noise_value = perlin.get([nx, ny]);
+                map.noise_map[(y * width + x) as usize] = noise_value;
+
+
+                if noise_value < 0.35 {
+                    let random_value: f64 = rng.gen();
+                    if random_value < 0.02 {
+                        map.resources[(y * width + x) as usize] = Some(ResourceType::Energy);
+                    } else if random_value < 0.025 {
+                        map.resources[(y * width + x) as usize] = Some(ResourceType::Mineral);
+                    } else if random_value < 0.03 {
+                        map.resources[(y * width + x) as usize] = Some(ResourceType::Scientific);
+                    }
+                }
             }
         }
 
@@ -97,7 +125,9 @@ fn draw_map(mut tile_map_query: Query<&mut TileMap>, map_query: Query<&Map>) {
 
     for y in 0..map.height {
         for x in 0..map.width {
-            let noise_value = map.noise_map[(y * map.width + x) as usize];
+            let index = (y * map.width + x) as usize;
+            let noise_value = map.noise_map[index];
+
             let sprite_index = if noise_value > 0.75 {
                 4
             } else if noise_value > 0.65 {
@@ -110,11 +140,21 @@ fn draw_map(mut tile_map_query: Query<&mut TileMap>, map_query: Query<&Map>) {
                 0
             };
 
+            
+            let mut tile_color = Color::WHITE;
+            if let Some(resource) = map.resources[index] {
+                match resource {
+                    ResourceType::Energy => tile_color = Color::rgb(1.0, 1.0, 0.0),
+                    ResourceType::Mineral => tile_color = Color::rgb(0.5, 0.5, 0.5),
+                    ResourceType::Scientific => tile_color = Color::rgb(0.0, 0.0, 1.0),
+                }
+            }
+
             tile_map.set_tile(
                 ivec3(x as i32, y as i32, 0),
                 Some(Tile {
                     sprite_index,
-                    color: Color::WHITE,
+                    color: tile_color,
                     ..Default::default()
                 }),
             );
