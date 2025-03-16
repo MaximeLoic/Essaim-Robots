@@ -1,14 +1,26 @@
-use bevy::{math::ivec3, prelude::*};
+use bevy::{
+    log::tracing_subscriber::fmt::time,
+    math::ivec3,
+    prelude::*,
+    render::{mesh, render_resource::ShaderType},
+};
 use bevy_simple_tilemap::{plugin::SimpleTileMapPlugin, Tile, TileMap};
 use noise::{NoiseFn, Perlin};
+use rand::Rng;
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(SimpleTileMapPlugin)
-        .add_systems(Startup, (setup, draw_map).chain())
-        .add_systems(Update, pan_view)
+        .add_systems(Startup, (setup, draw_map, spawn_robot).chain())
+        .add_systems(Update, (pan_view, move_robot))
         .run();
+}
+
+#[derive(Component)]
+struct Robot {
+    direction: f32,  // Direction en radians
+    turn_speed: f32, // Vitesse de rotation
 }
 
 #[derive(Component)]
@@ -147,5 +159,72 @@ fn pan_view(
         if transform.translation.x < right_boundary {
             transform.translation.x += PAN_SPEED;
         }
+    }
+}
+
+fn spawn_robot(
+    mut commands: Commands,
+    map: Single<&Map>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    let shape = Circle::new(10.0);
+
+    for _ in 0..100 {
+        commands.spawn((
+            Mesh2d(meshes.add(shape)),
+            Transform::from_xyz(0.0, 0.0, 1.0),
+            MeshMaterial2d(materials.add(Color::hsla(0.0, 0.0, 0.0, 1.0))),
+            Robot {
+                direction: 0.0,
+                turn_speed: 2.0,
+            },
+        ));
+    }
+}
+
+fn move_robot(mut query: Query<(&mut Transform, &mut Robot)>, map: Single<&Map>, time: Res<Time>) {
+    const SPEED: f32 = 100.0;
+    const MAX_TURN_RATE: f32 = 3.0; // Vitesse maximale de rotation en radians par seconde
+
+    let mut rng = rand::thread_rng();
+
+    for (mut transform, mut robot) in query.iter_mut() {
+        // Modifier légèrement la direction actuelle
+        let turn_amount = rng.gen_range(-MAX_TURN_RATE..MAX_TURN_RATE) * time.delta_secs();
+        robot.direction += turn_amount;
+
+        // Calculer le vecteur de déplacement basé sur la direction
+        let dx = robot.direction.cos() * SPEED * time.delta_secs();
+        let dy = robot.direction.sin() * SPEED * time.delta_secs();
+
+        // Appliquer le déplacement
+        transform.translation.x += dx;
+        transform.translation.y += dy;
+
+        // Limites de la carte pour éviter que le robot ne sorte
+        let map_width = map.width as f32 * map.tile_size as f32;
+        let map_height = map.height as f32 * map.tile_size as f32;
+        let radius = 10.0; // Rayon du robot
+
+        // Rebondir sur les bords
+        if transform.translation.x < radius {
+            transform.translation.x = radius;
+            robot.direction = std::f32::consts::PI - robot.direction;
+        } else if transform.translation.x > map_width - radius {
+            transform.translation.x = map_width - radius;
+            robot.direction = std::f32::consts::PI - robot.direction;
+        }
+
+        if transform.translation.y < radius {
+            transform.translation.y = radius;
+            robot.direction = -robot.direction;
+        } else if transform.translation.y > map_height - radius {
+            transform.translation.y = map_height - radius;
+            robot.direction = -robot.direction;
+        }
+
+        // Orienter le sprite dans la direction du mouvement (optionnel)
+        transform.rotation = Quat::from_rotation_z(robot.direction);
     }
 }
