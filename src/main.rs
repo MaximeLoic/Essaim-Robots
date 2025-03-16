@@ -1,8 +1,12 @@
 use bevy::{
     log::tracing_subscriber::fmt::time,
-    math::ivec3,
+    math::{
+        bounding::{Aabb2d, BoundingCircle, IntersectsVolume},
+        ivec3, vec2,
+    },
     prelude::*,
     render::{mesh, render_resource::ShaderType},
+    state::commands,
 };
 use bevy_simple_tilemap::{plugin::SimpleTileMapPlugin, Tile, TileMap};
 use noise::{NoiseFn, Perlin};
@@ -12,15 +16,19 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(SimpleTileMapPlugin)
-        .add_systems(Startup, (setup, draw_map, spawn_robot).chain())
+        .add_systems(Startup, (setup, draw_map, spawn_robots).chain())
         .add_systems(Update, (pan_view, move_robot))
         .run();
 }
 
 #[derive(Component)]
+struct Collider;
+
+#[derive(Component)]
 struct Robot {
     direction: f32,  // Direction en radians
     turn_speed: f32, // Vitesse de rotation
+    radius: f32,
 }
 
 #[derive(Component)]
@@ -55,6 +63,8 @@ impl Map {
             }
         }
 
+        map.noise_map[0] = 0.0;
+
         map
     }
 }
@@ -68,7 +78,7 @@ fn setup(
     const MAP_WIDTH: u32 = 250;
     const MAP_HEIGHT: u32 = 250;
     const MAP_SCALE: f64 = 25.0;
-    const SEED: u32 = 1;
+    const SEED: u32 = 5;
     const TILE_SIZE: u32 = 16;
     const WINDOW_WIDTH: f32 = 1000.0;
     const WINDOW_HEIGHT: f32 = 800.0;
@@ -83,21 +93,26 @@ fn setup(
     window.title = String::from("Robots Exploration");
     window.resizable = false;
 
-    commands.spawn(Camera2d);
     commands.spawn((
-        TileMap::new(texture_handle, atlas_layout_handle),
-        Transform::from_xyz(-1.0 * WINDOW_WIDTH / 2.0, -1.0 * WINDOW_HEIGHT / 2.0, 0.0),
+        Camera2d,
+        Transform::from_xyz(WINDOW_WIDTH / 2.0, WINDOW_HEIGHT / 2.0, 0.0),
     ));
+    commands.spawn(TileMap::new(texture_handle, atlas_layout_handle));
     commands.spawn(map);
 }
 
-fn draw_map(mut tile_map_query: Query<&mut TileMap>, map_query: Query<&Map>) {
+fn draw_map(
+    mut tile_map_query: Query<&mut TileMap>,
+    map_query: Query<&Map>,
+    mut commands: Commands,
+) {
     let map = map_query.single();
     let mut tile_map = tile_map_query.single_mut();
 
     for y in 0..map.height {
         for x in 0..map.width {
             let noise_value = map.noise_map[(y * map.width + x) as usize];
+
             let sprite_index = if noise_value > 0.75 {
                 4
             } else if noise_value > 0.65 {
@@ -109,6 +124,17 @@ fn draw_map(mut tile_map_query: Query<&mut TileMap>, map_query: Query<&Map>) {
             } else {
                 0
             };
+
+            if noise_value > 0.2 && noise_value < 0.35 {
+                commands.spawn((
+                    Collider,
+                    Transform::from_xyz(
+                        map.tile_size as f32 * x as f32,
+                        map.tile_size as f32 * y as f32,
+                        0.0,
+                    ),
+                ));
+            }
 
             tile_map.set_tile(
                 ivec3(x as i32, y as i32, 0),
@@ -132,13 +158,10 @@ fn pan_view(
     const PAN_SPEED: f32 = 10.0;
     const BORDER: f32 = 10.0;
 
-    let left_boundary: f32 = 0.0;
-    let right_boundary: f32 = map.tile_size as f32 * map.width as f32 - window.width() - BORDER;
-    let top_boundary: f32 = map.tile_size as f32 * map.height as f32 - window.height() - BORDER;
-    let bottom_boundary: f32 = 0.0;
-
-    println!("Camera: {:?}", transform);
-    println!("window_height: {:?}", window.height());
+    let left_boundary: f32 = window.width() / 2.0;
+    let right_boundary: f32 = map.tile_size as f32 * map.width as f32 - window.width();
+    let top_boundary: f32 = map.tile_size as f32 * map.height as f32 - window.height();
+    let bottom_boundary: f32 = window.height() / 2.0;
 
     if keys.pressed(KeyCode::ArrowUp) {
         if transform.translation.y < top_boundary {
@@ -162,15 +185,15 @@ fn pan_view(
     }
 }
 
-fn spawn_robot(
+fn spawn_robots(
     mut commands: Commands,
-    map: Single<&Map>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    let shape = Circle::new(10.0);
+    const ROBOT_RADIUS: f32 = 10.0;
+    let shape = Circle::new(ROBOT_RADIUS);
 
-    for _ in 0..100 {
+    for _ in 0..50 {
         commands.spawn((
             Mesh2d(meshes.add(shape)),
             Transform::from_xyz(0.0, 0.0, 1.0),
@@ -178,29 +201,64 @@ fn spawn_robot(
             Robot {
                 direction: 0.0,
                 turn_speed: 2.0,
+                radius: ROBOT_RADIUS,
             },
+            Collider,
         ));
     }
 }
 
-fn move_robot(mut query: Query<(&mut Transform, &mut Robot)>, map: Single<&Map>, time: Res<Time>) {
+fn move_robot(
+    mut query: Query<(&mut Transform, &mut Robot)>,
+    map: Single<&Map>,
+    time: Res<Time>,
+    collider_query: Query<&Transform, (With<Collider>, Without<Robot>)>,
+) {
     const SPEED: f32 = 100.0;
-    const MAX_TURN_RATE: f32 = 3.0; // Vitesse maximale de rotation en radians par seconde
+    const MAX_TURN_RATE: f32 = 5.0; // Vitesse maximale de rotation en radians par seconde
 
     let mut rng = rand::thread_rng();
 
     for (mut transform, mut robot) in query.iter_mut() {
-        // Modifier légèrement la direction actuelle
-        let turn_amount = rng.gen_range(-MAX_TURN_RATE..MAX_TURN_RATE) * time.delta_secs();
-        robot.direction += turn_amount;
+        let mut collision_detected = false;
+
+        // Position actuelle
+        let current_pos = vec2(transform.translation.x, transform.translation.y);
 
         // Calculer le vecteur de déplacement basé sur la direction
         let dx = robot.direction.cos() * SPEED * time.delta_secs();
         let dy = robot.direction.sin() * SPEED * time.delta_secs();
 
-        // Appliquer le déplacement
-        transform.translation.x += dx;
-        transform.translation.y += dy;
+        // Nouvelle position prévue
+        let new_pos = vec2(current_pos.x + dx, current_pos.y + dy);
+
+        // Vérifier les collisions à la nouvelle position
+        let robot_bounding_circle = BoundingCircle::new(new_pos, robot.radius);
+
+        for obstacle in &collider_query {
+            let obstacle_bounding_box = Aabb2d::new(
+                vec2(obstacle.translation.x, obstacle.translation.y),
+                vec2(map.tile_size as f32 / 2.0, map.tile_size as f32 / 2.0),
+            );
+
+            if obstacle_collision(robot_bounding_circle, obstacle_bounding_box) {
+                collision_detected = true;
+                break;
+            }
+        }
+
+        if collision_detected {
+            // Modifier la direction de manière aléatoire
+            robot.direction += rng.gen_range(-MAX_TURN_RATE..MAX_TURN_RATE);
+        } else {
+            // Pas de collision, appliquer le mouvement normal
+            transform.translation.x = new_pos.x;
+            transform.translation.y = new_pos.y;
+
+            // Modifier légèrement la direction actuelle
+            let turn_amount = rng.gen_range(-MAX_TURN_RATE..MAX_TURN_RATE) * time.delta_secs();
+            robot.direction += turn_amount;
+        }
 
         // Limites de la carte pour éviter que le robot ne sorte
         let map_width = map.width as f32 * map.tile_size as f32;
@@ -223,8 +281,12 @@ fn move_robot(mut query: Query<(&mut Transform, &mut Robot)>, map: Single<&Map>,
             transform.translation.y = map_height - radius;
             robot.direction = -robot.direction;
         }
-
-        // Orienter le sprite dans la direction du mouvement (optionnel)
-        transform.rotation = Quat::from_rotation_z(robot.direction);
     }
+}
+
+fn obstacle_collision(
+    robot_bounding_circle: BoundingCircle,
+    obstacle_bounding_box: Aabb2d,
+) -> bool {
+    return robot_bounding_circle.intersects(&obstacle_bounding_box);
 }
