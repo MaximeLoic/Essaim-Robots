@@ -16,10 +16,16 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(SimpleTileMapPlugin)
-        .add_systems(Startup, (setup, draw_map, spawn_robots).chain())
-        .add_systems(Update, (pan_view, move_robot))
+        .add_systems(
+            Startup,
+            (setup, draw_map, spawn_resources, spawn_robots).chain(),
+        )
+        .add_systems(Update, (pan_view, move_robot, follow_resource))
         .run();
 }
+
+#[derive(Component)]
+struct Obstacle;
 
 #[derive(Component)]
 struct Collider;
@@ -30,6 +36,9 @@ struct Robot {
     turn_speed: f32, // Vitesse de rotation
     radius: f32,
 }
+
+#[derive(Component)]
+struct GameResource;
 
 #[derive(Component)]
 
@@ -128,6 +137,7 @@ fn draw_map(
             if noise_value > 0.2 && noise_value < 0.35 {
                 commands.spawn((
                     Collider,
+                    Obstacle,
                     Transform::from_xyz(
                         map.tile_size as f32 * x as f32,
                         map.tile_size as f32 * y as f32,
@@ -146,6 +156,72 @@ fn draw_map(
             );
         }
     }
+}
+
+fn spawn_resources(
+    mut commands: Commands,
+    map: Single<&Map>,
+    collider_query: Query<&Transform, With<Collider>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    const RESOURCE_COUNT: usize = 300;
+    const RESOURCE_SIZE: f32 = 8.0;
+    let mut rng = rand::thread_rng();
+
+    let map_width = map.width as f32 * map.tile_size as f32;
+    let map_height = map.height as f32 * map.tile_size as f32;
+
+    // Collecter toutes les positions des obstacles
+    let obstacle_positions: Vec<Vec2> = collider_query
+        .iter()
+        .map(|transform| Vec2::new(transform.translation.x, transform.translation.y))
+        .collect();
+
+    let mut resources_placed = 0;
+    let mut attempts = 0;
+
+    while resources_placed < RESOURCE_COUNT && attempts < 1000 {
+        attempts += 1;
+
+        // Générer une position aléatoire
+        let x = rng.gen_range(RESOURCE_SIZE..map_width - RESOURCE_SIZE);
+        let y = rng.gen_range(RESOURCE_SIZE..map_height - RESOURCE_SIZE);
+
+        // Vérifier s'il y a collision avec un obstacle
+        let resource_circle = BoundingCircle::new(Vec2::new(x, y), RESOURCE_SIZE);
+        let mut collision = false;
+
+        for obstacle_pos in &obstacle_positions {
+            let obstacle_box = Aabb2d::new(
+                *obstacle_pos,
+                Vec2::new(map.tile_size as f32 / 2.0, map.tile_size as f32 / 2.0),
+            );
+
+            if resource_circle.intersects(&obstacle_box) {
+                collision = true;
+                break;
+            }
+        }
+
+        // Si pas de collision, placer la ressource
+        if !collision {
+            commands.spawn((
+                GameResource,
+                Collider,
+                Transform::from_xyz(x, y, 0.5),
+                Mesh2d(meshes.add(Circle::new(RESOURCE_SIZE))),
+                MeshMaterial2d(materials.add(Color::hsla(36.0, 1.0, 0.5, 1.0))),
+            ));
+
+            resources_placed += 1;
+        }
+    }
+
+    info!(
+        "Ressources placées: {}/{}",
+        resources_placed, RESOURCE_COUNT
+    );
 }
 
 fn pan_view(
@@ -193,7 +269,7 @@ fn spawn_robots(
     const ROBOT_RADIUS: f32 = 10.0;
     let shape = Circle::new(ROBOT_RADIUS);
 
-    for _ in 0..50 {
+    for _ in 0..5 {
         commands.spawn((
             Mesh2d(meshes.add(shape)),
             Transform::from_xyz(0.0, 0.0, 1.0),
@@ -212,7 +288,11 @@ fn move_robot(
     mut query: Query<(&mut Transform, &mut Robot)>,
     map: Single<&Map>,
     time: Res<Time>,
-    collider_query: Query<&Transform, (With<Collider>, Without<Robot>)>,
+    collider_query: Query<
+        (Entity, &Transform, Option<&GameResource>),
+        (With<Collider>, Without<Robot>),
+    >,
+    mut commands: Commands,
 ) {
     const SPEED: f32 = 100.0;
     const MAX_TURN_RATE: f32 = 5.0; // Vitesse maximale de rotation en radians par seconde
@@ -235,14 +315,27 @@ fn move_robot(
         // Vérifier les collisions à la nouvelle position
         let robot_bounding_circle = BoundingCircle::new(new_pos, robot.radius);
 
-        for obstacle in &collider_query {
-            let obstacle_bounding_box = Aabb2d::new(
-                vec2(obstacle.translation.x, obstacle.translation.y),
+        for (collider_entity, collider_transform, game_resource) in &collider_query {
+            let collider_bounding_box = Aabb2d::new(
+                vec2(
+                    collider_transform.translation.x,
+                    collider_transform.translation.y,
+                ),
                 vec2(map.tile_size as f32 / 2.0, map.tile_size as f32 / 2.0),
             );
 
-            if obstacle_collision(robot_bounding_circle, obstacle_bounding_box) {
-                collision_detected = true;
+            if robot_bounding_circle.intersects(&collider_bounding_box) {
+                if let Some(_) = game_resource {
+                    println!(
+                        "Collision with resource at {}, {}",
+                        collider_transform.translation.x, collider_transform.translation.y
+                    );
+                    commands.entity(collider_entity).despawn();
+                    continue;
+                } else {
+                    collision_detected = true;
+                }
+
                 break;
             }
         }
@@ -284,9 +377,58 @@ fn move_robot(
     }
 }
 
-fn obstacle_collision(
-    robot_bounding_circle: BoundingCircle,
-    obstacle_bounding_box: Aabb2d,
-) -> bool {
-    return robot_bounding_circle.intersects(&obstacle_bounding_box);
+fn follow_resource(
+    mut robots_query: Query<(&Transform, &mut Robot), With<Robot>>,
+    resources_query: Query<&Transform, With<GameResource>>,
+    time: Res<Time>,
+) {
+    const DETECTION_RADIUS: f32 = 100.0;
+    const ROTATION_SPEED: f32 = 2.0;
+
+    for (robot_transform, mut robot) in robots_query.iter_mut() {
+        let mut closest_resource: Option<(Transform, f32)> = None;
+
+        // Trouver la ressource la plus proche dans le rayon de détection
+        for resource_transform in &resources_query {
+            let distance_to_resource = robot_transform
+                .translation
+                .distance(resource_transform.translation);
+
+            if distance_to_resource < DETECTION_RADIUS {
+                if closest_resource.is_none() || distance_to_resource < closest_resource.unwrap().1
+                {
+                    closest_resource = Some((*resource_transform, distance_to_resource));
+                }
+            }
+        }
+
+        if let Some((resource_transform, _)) = closest_resource {
+            println!(
+                "Found resource at {}, {}",
+                resource_transform.translation.x, resource_transform.translation.y
+            );
+            let dx = resource_transform.translation.x - robot_transform.translation.x;
+            let dy = resource_transform.translation.y - robot_transform.translation.y;
+
+            // Calculer la direction vers la ressource (y, x) pour atan2
+            let target_direction = dy.atan2(dx);
+
+            // Rotation progressive vers la cible
+            let mut angle_diff = target_direction - robot.direction;
+
+            // Normaliser la différence d'angle entre -PI et PI
+            while angle_diff > std::f32::consts::PI {
+                angle_diff -= 2.0 * std::f32::consts::PI;
+            }
+            while angle_diff < -std::f32::consts::PI {
+                angle_diff += 2.0 * std::f32::consts::PI;
+            }
+
+            // Appliquer la rotation avec une vitesse limitée
+            let rotation_amount =
+                angle_diff.signum() * (angle_diff.abs().min(ROTATION_SPEED * time.delta_secs()));
+
+            robot.direction += rotation_amount;
+        }
+    }
 }
