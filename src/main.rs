@@ -1,12 +1,12 @@
+use core::f32;
+use std::vec;
+
 use bevy::{
-    log::tracing_subscriber::fmt::time,
     math::{
         bounding::{Aabb2d, BoundingCircle, IntersectsVolume},
         ivec3, vec2,
     },
     prelude::*,
-    render::{mesh, render_resource::ShaderType},
-    state::commands,
 };
 use bevy_simple_tilemap::{plugin::SimpleTileMapPlugin, Tile, TileMap};
 use noise::{NoiseFn, Perlin};
@@ -20,7 +20,16 @@ fn main() {
             Startup,
             (setup, draw_map, spawn_resources, spawn_robots).chain(),
         )
-        .add_systems(Update, (pan_view, move_robot, follow_resource))
+        .add_systems(
+            Update,
+            (
+                pan_view,
+                explore,
+                check_collisions,
+                sense_resource,
+                collect_resource,
+            ),
+        )
         .run();
 }
 
@@ -28,13 +37,28 @@ fn main() {
 struct Obstacle;
 
 #[derive(Component)]
-struct Collider;
+struct Collider {
+    bounding_box: Aabb2d,
+}
+
+#[derive(Resource)]
+struct SensorMaterial {
+    on: Handle<ColorMaterial>,
+    detected: Handle<ColorMaterial>,
+}
 
 #[derive(Component)]
 struct Robot {
-    direction: f32,  // Direction en radians
-    turn_speed: f32, // Vitesse de rotation
+    direction: f32, // Direction en radians
     radius: f32,
+    speed: f32,
+    max_turn_rate: f32,
+}
+
+#[derive(Component)]
+
+struct Sensor {
+    range: u32,
 }
 
 #[derive(Component)]
@@ -94,7 +118,6 @@ fn setup(
 
     let map = Map::from_perlin_noise(MAP_WIDTH, MAP_HEIGHT, TILE_SIZE, SEED, MAP_SCALE);
     let texture_handle = asset_server.load::<Image>("tile.png");
-
     let atlas_layout = TextureAtlasLayout::from_grid(UVec2::splat(TILE_SIZE), 10, 10, None, None);
     let atlas_layout_handle = texture_atlas_layouts.add(atlas_layout);
 
@@ -106,17 +129,11 @@ fn setup(
         Camera2d,
         Transform::from_xyz(WINDOW_WIDTH / 2.0, WINDOW_HEIGHT / 2.0, 0.0),
     ));
-    commands.spawn(TileMap::new(texture_handle, atlas_layout_handle));
-    commands.spawn(map);
+    commands.spawn((map, TileMap::new(texture_handle, atlas_layout_handle)));
 }
 
-fn draw_map(
-    mut tile_map_query: Query<&mut TileMap>,
-    map_query: Query<&Map>,
-    mut commands: Commands,
-) {
-    let map = map_query.single();
-    let mut tile_map = tile_map_query.single_mut();
+fn draw_map(map_query: Single<(&Map, &mut TileMap)>, mut commands: Commands) {
+    let (map, mut tile_map) = map_query.into_inner();
 
     for y in 0..map.height {
         for x in 0..map.width {
@@ -136,7 +153,15 @@ fn draw_map(
 
             if noise_value > 0.2 && noise_value < 0.35 {
                 commands.spawn((
-                    Collider,
+                    Collider {
+                        bounding_box: Aabb2d::new(
+                            vec2(
+                                x as f32 * map.tile_size as f32,
+                                y as f32 * map.tile_size as f32,
+                            ),
+                            vec2(map.tile_size as f32 / 2.0, map.tile_size as f32 / 2.0),
+                        ),
+                    },
                     Obstacle,
                     Transform::from_xyz(
                         map.tile_size as f32 * x as f32,
@@ -208,7 +233,9 @@ fn spawn_resources(
         if !collision {
             commands.spawn((
                 GameResource,
-                Collider,
+                Collider {
+                    bounding_box: Aabb2d::new(vec2(x, y), vec2(RESOURCE_SIZE, RESOURCE_SIZE)),
+                },
                 Transform::from_xyz(x, y, 0.5),
                 Mesh2d(meshes.add(Circle::new(RESOURCE_SIZE))),
                 MeshMaterial2d(materials.add(Color::hsla(36.0, 1.0, 0.5, 1.0))),
@@ -232,7 +259,6 @@ fn pan_view(
 ) {
     let mut transform = camera_query.single_mut();
     const PAN_SPEED: f32 = 10.0;
-    const BORDER: f32 = 10.0;
 
     let left_boundary: f32 = window.width() / 2.0;
     let right_boundary: f32 = map.tile_size as f32 * map.width as f32 - window.width();
@@ -267,47 +293,91 @@ fn spawn_robots(
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     const ROBOT_RADIUS: f32 = 10.0;
-    let shape = Circle::new(ROBOT_RADIUS);
 
-    for _ in 0..5 {
-        commands.spawn((
-            Mesh2d(meshes.add(shape)),
-            Transform::from_xyz(0.0, 0.0, 1.0),
-            MeshMaterial2d(materials.add(Color::hsla(0.0, 0.0, 0.0, 1.0))),
-            Robot {
-                direction: 0.0,
-                turn_speed: 2.0,
-                radius: ROBOT_RADIUS,
-            },
-            Collider,
-        ));
+    let shape = Circle::new(ROBOT_RADIUS);
+    let sensor_range = 50;
+
+    let sensor_material_resource = SensorMaterial {
+        on: materials.add(Color::hsla(207.0, 1.9, 0.5, 0.2)),
+        detected: materials.add(Color::hsla(105.0, 0.55, 0.48, 0.2)),
+    };
+
+    for _ in 0..25 {
+        commands
+            .spawn((
+                Mesh2d(meshes.add(shape)),
+                Transform::from_xyz(0.0, 0.0, 1.0),
+                MeshMaterial2d(materials.add(Color::hsla(0.0, 0.0, 0.0, 1.0))),
+                Robot {
+                    direction: 0.0,
+                    radius: ROBOT_RADIUS,
+                    speed: 50.0,
+                    max_turn_rate: 5.0,
+                },
+            ))
+            .with_child((
+                Sensor {
+                    range: sensor_range,
+                },
+                Mesh2d(meshes.add(Circle::new(sensor_range as f32))),
+                MeshMaterial2d(sensor_material_resource.on.clone()),
+            ));
     }
+
+    commands.insert_resource(sensor_material_resource);
 }
 
-fn move_robot(
-    mut query: Query<(&mut Transform, &mut Robot)>,
-    map: Single<&Map>,
-    time: Res<Time>,
-    collider_query: Query<
-        (Entity, &Transform, Option<&GameResource>),
-        (With<Collider>, Without<Robot>),
-    >,
-    mut commands: Commands,
-) {
-    const SPEED: f32 = 100.0;
-    const MAX_TURN_RATE: f32 = 5.0; // Vitesse maximale de rotation en radians par seconde
-
+fn explore(mut query: Query<(&mut Transform, &mut Robot)>, map: Single<&Map>, time: Res<Time>) {
     let mut rng = rand::thread_rng();
 
     for (mut transform, mut robot) in query.iter_mut() {
+        transform.translation.x += robot.direction.cos() * robot.speed * time.delta_secs();
+        transform.translation.y += robot.direction.sin() * robot.speed * time.delta_secs();
+
+        // Modifier légèrement la direction actuelle
+        let turn_amount =
+            rng.gen_range(-robot.max_turn_rate..robot.max_turn_rate) * time.delta_secs();
+
+        robot.direction += turn_amount;
+
+        // Limites de la carte pour éviter que le robot ne sorte
+        let map_width = map.width as f32 * map.tile_size as f32;
+        let map_height = map.height as f32 * map.tile_size as f32;
+
+        // Rebondir sur les bords
+        if transform.translation.x < robot.radius {
+            transform.translation.x = robot.radius;
+            robot.direction = std::f32::consts::PI - robot.direction;
+        } else if transform.translation.x > map_width - robot.radius {
+            transform.translation.x = map_width - robot.radius;
+            robot.direction = std::f32::consts::PI - robot.direction;
+        }
+        if transform.translation.y < robot.radius {
+            transform.translation.y = robot.radius;
+            robot.direction = -robot.direction;
+        } else if transform.translation.y > map_height - robot.radius {
+            transform.translation.y = map_height - robot.radius;
+            robot.direction = -robot.direction;
+        }
+    }
+}
+
+fn check_collisions(
+    mut robots_query: Query<(&mut Transform, &mut Robot)>,
+    obstacles_query: Query<&Collider, With<Obstacle>>,
+    time: Res<Time>,
+) {
+    let mut rng = rand::thread_rng();
+
+    for (transform, mut robot) in robots_query.iter_mut() {
         let mut collision_detected = false;
 
         // Position actuelle
         let current_pos = vec2(transform.translation.x, transform.translation.y);
 
         // Calculer le vecteur de déplacement basé sur la direction
-        let dx = robot.direction.cos() * SPEED * time.delta_secs();
-        let dy = robot.direction.sin() * SPEED * time.delta_secs();
+        let dx = robot.direction.cos() * robot.speed * time.delta_secs();
+        let dy = robot.direction.sin() * robot.speed * time.delta_secs();
 
         // Nouvelle position prévue
         let new_pos = vec2(current_pos.x + dx, current_pos.y + dy);
@@ -315,120 +385,105 @@ fn move_robot(
         // Vérifier les collisions à la nouvelle position
         let robot_bounding_circle = BoundingCircle::new(new_pos, robot.radius);
 
-        for (collider_entity, collider_transform, game_resource) in &collider_query {
-            let collider_bounding_box = Aabb2d::new(
-                vec2(
-                    collider_transform.translation.x,
-                    collider_transform.translation.y,
-                ),
-                vec2(map.tile_size as f32 / 2.0, map.tile_size as f32 / 2.0),
-            );
-
-            if robot_bounding_circle.intersects(&collider_bounding_box) {
-                if let Some(_) = game_resource {
-                    println!(
-                        "Collision with resource at {}, {}",
-                        collider_transform.translation.x, collider_transform.translation.y
-                    );
-                    commands.entity(collider_entity).despawn();
-                    continue;
-                } else {
-                    collision_detected = true;
-                }
-
+        for obstacle_collider in &obstacles_query {
+            if robot_bounding_circle.intersects(&obstacle_collider.bounding_box) {
+                collision_detected = true;
                 break;
             }
         }
 
         if collision_detected {
-            // Modifier la direction de manière aléatoire
-            robot.direction += rng.gen_range(-MAX_TURN_RATE..MAX_TURN_RATE);
-        } else {
-            // Pas de collision, appliquer le mouvement normal
-            transform.translation.x = new_pos.x;
-            transform.translation.y = new_pos.y;
-
-            // Modifier légèrement la direction actuelle
-            let turn_amount = rng.gen_range(-MAX_TURN_RATE..MAX_TURN_RATE) * time.delta_secs();
-            robot.direction += turn_amount;
-        }
-
-        // Limites de la carte pour éviter que le robot ne sorte
-        let map_width = map.width as f32 * map.tile_size as f32;
-        let map_height = map.height as f32 * map.tile_size as f32;
-        let radius = 10.0; // Rayon du robot
-
-        // Rebondir sur les bords
-        if transform.translation.x < radius {
-            transform.translation.x = radius;
-            robot.direction = std::f32::consts::PI - robot.direction;
-        } else if transform.translation.x > map_width - radius {
-            transform.translation.x = map_width - radius;
-            robot.direction = std::f32::consts::PI - robot.direction;
-        }
-
-        if transform.translation.y < radius {
-            transform.translation.y = radius;
-            robot.direction = -robot.direction;
-        } else if transform.translation.y > map_height - radius {
-            transform.translation.y = map_height - radius;
-            robot.direction = -robot.direction;
+            // Modifier la direction de manière aléatoire avec un angle plus important
+            robot.direction += rng.gen_range((f32::consts::PI * 0.75)..(f32::consts::PI * 1.25));
         }
     }
 }
 
-fn follow_resource(
-    mut robots_query: Query<(&Transform, &mut Robot), With<Robot>>,
-    resources_query: Query<&Transform, With<GameResource>>,
-    time: Res<Time>,
+fn collect_resource(
+    mut commands: Commands,
+    mut resources_query: Query<(Entity, &Collider), With<GameResource>>,
+    robots: Query<(&Transform, &Robot)>,
 ) {
-    const DETECTION_RADIUS: f32 = 100.0;
-    const ROTATION_SPEED: f32 = 2.0;
+    for (robot_transform, robot) in &robots {
+        for (resource_entity, resource_collider) in resources_query.iter_mut() {
+            let robot_bounding_circle = BoundingCircle::new(
+                vec2(robot_transform.translation.x, robot_transform.translation.y),
+                robot.radius,
+            );
 
-    for (robot_transform, mut robot) in robots_query.iter_mut() {
-        let mut closest_resource: Option<(Transform, f32)> = None;
-
-        // Trouver la ressource la plus proche dans le rayon de détection
-        for resource_transform in &resources_query {
-            let distance_to_resource = robot_transform
-                .translation
-                .distance(resource_transform.translation);
-
-            if distance_to_resource < DETECTION_RADIUS {
-                if closest_resource.is_none() || distance_to_resource < closest_resource.unwrap().1
-                {
-                    closest_resource = Some((*resource_transform, distance_to_resource));
-                }
+            if robot_bounding_circle.intersects(&resource_collider.bounding_box) {
+                commands.entity(resource_entity).despawn();
             }
         }
+    }
+}
 
-        if let Some((resource_transform, _)) = closest_resource {
-            println!(
-                "Found resource at {}, {}",
-                resource_transform.translation.x, resource_transform.translation.y
-            );
-            let dx = resource_transform.translation.x - robot_transform.translation.x;
-            let dy = resource_transform.translation.y - robot_transform.translation.y;
+fn sense_resource(
+    mut sensors_query: Query<(&mut Parent, &Sensor, &mut MeshMaterial2d<ColorMaterial>)>,
+    mut parent_query: Query<(&mut Transform, &mut Robot)>,
+    resources_query: Query<&Transform, (With<GameResource>, Without<Robot>)>,
+    time: Res<Time>,
+    sensor_material: Res<SensorMaterial>,
+) {
+    const ROTATION_SPEED: f32 = 2.0;
 
-            // Calculer la direction vers la ressource (y, x) pour atan2
-            let target_direction = dy.atan2(dx);
+    for (parent, sensor, mut material) in sensors_query.iter_mut() {
+        let parent_result: Result<
+            (Mut<'_, Transform>, Mut<'_, Robot>),
+            bevy::ecs::query::QueryEntityError<'_>,
+        > = parent_query.get_mut(parent.get());
 
-            // Rotation progressive vers la cible
-            let mut angle_diff = target_direction - robot.direction;
+        if let Ok((robot_transform, mut robot)) = parent_result {
+            let mut closest_resource: Option<(Transform, f32)> = None;
 
-            // Normaliser la différence d'angle entre -PI et PI
-            while angle_diff > std::f32::consts::PI {
-                angle_diff -= 2.0 * std::f32::consts::PI;
+            // Trouver la ressource la plus proche dans le rayon de détection
+            for resource_transform in &resources_query {
+                let distance_to_resource = robot_transform
+                    .translation
+                    .distance(resource_transform.translation);
+
+                if distance_to_resource < sensor.range as f32 {
+                    if closest_resource.is_none()
+                        || distance_to_resource < closest_resource.unwrap().1
+                    {
+                        closest_resource = Some((*resource_transform, distance_to_resource));
+                    }
+                }
             }
-            while angle_diff < -std::f32::consts::PI {
-                angle_diff += 2.0 * std::f32::consts::PI;
+
+            if let Some((resource_transform, _)) = closest_resource {
+                println!(
+                    "Found resource at {}, {}",
+                    resource_transform.translation.x, resource_transform.translation.y
+                );
+
+                *material = MeshMaterial2d(sensor_material.detected.clone());
+
+                let dx = resource_transform.translation.x - robot_transform.translation.x;
+                let dy = resource_transform.translation.y - robot_transform.translation.y;
+
+                // Calculer la direction vers la ressource (y, x) pour atan2
+                let target_direction = dy.atan2(dx);
+
+                // Rotation progressive vers la cible
+                let mut angle_diff = target_direction - robot.direction;
+
+                // Normaliser la différence d'angle entre -PI et PI
+                while angle_diff > std::f32::consts::PI {
+                    angle_diff -= 2.0 * std::f32::consts::PI;
+                }
+                while angle_diff < -std::f32::consts::PI {
+                    angle_diff += 2.0 * std::f32::consts::PI;
+                }
+
+                // Appliquer la rotation avec une vitesse limitée
+                let rotation_amount = angle_diff.signum()
+                    * (angle_diff.abs().min(ROTATION_SPEED * time.delta_secs()));
+
+                robot.direction += rotation_amount;
+            } else {
+                *material = MeshMaterial2d(sensor_material.on.clone());
             }
-
-            // Appliquer la rotation avec une vitesse limitée
-            let rotation_amount =
-                angle_diff.signum() * (angle_diff.abs().min(ROTATION_SPEED * time.delta_secs()));
-
-            robot.direction += rotation_amount;
         }
     }
 }
