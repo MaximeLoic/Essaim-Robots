@@ -1,5 +1,5 @@
 use crate::{
-    common::{Collider, GameResource, Obstacle},
+    common::{Collider, GameResource, Obstacle, ResourceCollectedEvent},
     map::Map,
 };
 use bevy::{
@@ -19,7 +19,7 @@ impl Plugin for RobotPlugin {
         app.add_systems(Startup, spawn_robots);
         app.add_systems(
             Update,
-            (explore, check_collisions, collect_resource, sense_resource),
+            (seek, check_collisions, collect_resource, sense_resource),
         );
     }
 }
@@ -37,6 +37,12 @@ pub struct Sensor {
     pub range: u32,
 }
 
+#[derive(Component)]
+pub struct Explorer;
+
+#[derive(Component)]
+pub struct Collector;
+
 #[derive(Resource)]
 pub struct SensorMaterial {
     on: Handle<ColorMaterial>,
@@ -48,34 +54,51 @@ fn spawn_robots(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    const ROBOT_RADIUS: f32 = 10.0;
-
-    let shape = Circle::new(ROBOT_RADIUS);
-    let sensor_range = 50;
-
     let sensor_material_resource = SensorMaterial {
         on: materials.add(Color::hsla(207.0, 1.9, 0.5, 0.2)),
         detected: materials.add(Color::hsla(105.0, 0.55, 0.48, 0.2)),
     };
 
-    for _ in 0..25 {
+    // // Explorateurs
+    for _ in 0..2 {
         commands
             .spawn((
-                Mesh2d(meshes.add(shape)),
+                Mesh2d(meshes.add(Circle::new(5.0))),
                 Transform::from_xyz(0.0, 0.0, 1.0),
                 MeshMaterial2d(materials.add(Color::hsla(0.0, 0.0, 0.0, 1.0))),
+                Explorer,
                 Robot {
                     direction: 0.0,
-                    radius: ROBOT_RADIUS,
-                    speed: 50.0,
+                    radius: 5.0,
+                    speed: 70.0,
                     max_turn_rate: 5.0,
                 },
             ))
             .with_child((
-                Sensor {
-                    range: sensor_range,
+                Sensor { range: 200 },
+                Mesh2d(meshes.add(Circle::new(200.0))),
+                MeshMaterial2d(sensor_material_resource.on.clone()),
+            ));
+    }
+
+    // Collecteurs de ressources
+    for _ in 0..2 {
+        commands
+            .spawn((
+                Mesh2d(meshes.add(Circle::new(10.0))),
+                Transform::from_xyz(0.0, 0.0, 1.0),
+                MeshMaterial2d(materials.add(Color::hsla(0.0, 0.0, 0.0, 1.0))),
+                Collector,
+                Robot {
+                    direction: 0.0,
+                    radius: 10.0,
+                    speed: 50.0,
+                    max_turn_rate: 20.0,
                 },
-                Mesh2d(meshes.add(Circle::new(sensor_range as f32))),
+            ))
+            .with_child((
+                Sensor { range: 100 },
+                Mesh2d(meshes.add(Circle::new(100.0))),
                 MeshMaterial2d(sensor_material_resource.on.clone()),
             ));
     }
@@ -83,7 +106,7 @@ fn spawn_robots(
     commands.insert_resource(sensor_material_resource);
 }
 
-fn explore(mut query: Query<(&mut Transform, &mut Robot)>, map: Single<&Map>, time: Res<Time>) {
+fn seek(mut query: Query<(&mut Transform, &mut Robot)>, map: Single<&Map>, time: Res<Time>) {
     let mut rng = rand::thread_rng();
 
     for (mut transform, mut robot) in query.iter_mut() {
@@ -126,7 +149,7 @@ fn check_collisions(
     let mut rng = rand::thread_rng();
 
     for (transform, mut robot) in robots_query.iter_mut() {
-        let mut collision_detected = false;
+        let mut colliding_obstacle: Option<&Collider> = None;
 
         // Position actuelle
         let current_pos = vec2(transform.translation.x, transform.translation.y);
@@ -143,13 +166,12 @@ fn check_collisions(
 
         for obstacle_collider in &obstacles_query {
             if robot_bounding_circle.intersects(&obstacle_collider.bounding_box) {
-                collision_detected = true;
+                colliding_obstacle = Some(obstacle_collider);
                 break;
             }
         }
 
-        if collision_detected {
-            // Modifier la direction de manière aléatoire avec un angle plus important
+        if let Some(_) = colliding_obstacle {
             robot.direction += rng.gen_range((f32::consts::PI * 0.75)..(f32::consts::PI * 1.25));
         }
     }
@@ -158,9 +180,10 @@ fn check_collisions(
 fn collect_resource(
     mut commands: Commands,
     mut resources_query: Query<(Entity, &Collider), With<GameResource>>,
-    robots: Query<(&Transform, &Robot)>,
+    collectors: Query<(&Transform, &Robot), With<Collector>>,
+    mut events: EventWriter<ResourceCollectedEvent>,
 ) {
-    for (robot_transform, robot) in &robots {
+    for (robot_transform, robot) in &collectors {
         for (resource_entity, resource_collider) in resources_query.iter_mut() {
             let robot_bounding_circle = BoundingCircle::new(
                 vec2(robot_transform.translation.x, robot_transform.translation.y),
@@ -168,6 +191,7 @@ fn collect_resource(
             );
 
             if robot_bounding_circle.intersects(&resource_collider.bounding_box) {
+                events.send(ResourceCollectedEvent);
                 commands.entity(resource_entity).despawn();
             }
         }
@@ -176,7 +200,12 @@ fn collect_resource(
 
 fn sense_resource(
     mut sensors_query: Query<(&mut Parent, &Sensor, &mut MeshMaterial2d<ColorMaterial>)>,
-    mut parent_query: Query<(&mut Transform, &mut Robot)>,
+    mut parent_query: Query<(
+        &mut Transform,
+        &mut Robot,
+        Option<&Collector>,
+        Option<&Explorer>,
+    )>,
     resources_query: Query<&Transform, (With<GameResource>, Without<Robot>)>,
     time: Res<Time>,
     sensor_material: Res<SensorMaterial>,
@@ -184,12 +213,9 @@ fn sense_resource(
     const ROTATION_SPEED: f32 = 2.0;
 
     for (parent, sensor, mut material) in sensors_query.iter_mut() {
-        let parent_result: Result<
-            (Mut<'_, Transform>, Mut<'_, Robot>),
-            bevy::ecs::query::QueryEntityError<'_>,
-        > = parent_query.get_mut(parent.get());
+        let parent_result = parent_query.get_mut(parent.get());
 
-        if let Ok((robot_transform, mut robot)) = parent_result {
+        if let Ok((robot_transform, mut robot, collector, explorer)) = parent_result {
             let mut closest_resource: Option<(Transform, f32)> = None;
 
             // Trouver la ressource la plus proche dans le rayon de détection
@@ -208,35 +234,33 @@ fn sense_resource(
             }
 
             if let Some((resource_transform, _)) = closest_resource {
-                println!(
-                    "Found resource at {}, {}",
-                    resource_transform.translation.x, resource_transform.translation.y
-                );
-
                 *material = MeshMaterial2d(sensor_material.detected.clone());
 
-                let dx = resource_transform.translation.x - robot_transform.translation.x;
-                let dy = resource_transform.translation.y - robot_transform.translation.y;
+                if let Some(_) = collector {
+                    let dx = resource_transform.translation.x - robot_transform.translation.x;
+                    let dy = resource_transform.translation.y - robot_transform.translation.y;
 
-                // Calculer la direction vers la ressource (y, x) pour atan2
-                let target_direction = dy.atan2(dx);
+                    // Calculer la direction vers la ressource (y, x) pour atan2
+                    let target_direction = dy.atan2(dx);
 
-                // Rotation progressive vers la cible
-                let mut angle_diff = target_direction - robot.direction;
+                    // Rotation progressive vers la cible
+                    let mut angle_diff = target_direction - robot.direction;
 
-                // Normaliser la différence d'angle entre -PI et PI
-                while angle_diff > std::f32::consts::PI {
-                    angle_diff -= 2.0 * std::f32::consts::PI;
+                    // Normaliser la différence d'angle entre -PI et PI
+                    while angle_diff > std::f32::consts::PI {
+                        angle_diff -= 2.0 * std::f32::consts::PI;
+                    }
+                    while angle_diff < -std::f32::consts::PI {
+                        angle_diff += 2.0 * std::f32::consts::PI;
+                    }
+
+                    // Appliquer la rotation avec une vitesse limitée
+                    let rotation_amount = angle_diff.signum()
+                        * (angle_diff.abs().min(ROTATION_SPEED * time.delta_secs()));
+
+                    robot.direction += rotation_amount;
+                } else if let Some(_) = explorer {
                 }
-                while angle_diff < -std::f32::consts::PI {
-                    angle_diff += 2.0 * std::f32::consts::PI;
-                }
-
-                // Appliquer la rotation avec une vitesse limitée
-                let rotation_amount = angle_diff.signum()
-                    * (angle_diff.abs().min(ROTATION_SPEED * time.delta_secs()));
-
-                robot.direction += rotation_amount;
             } else {
                 *material = MeshMaterial2d(sensor_material.on.clone());
             }

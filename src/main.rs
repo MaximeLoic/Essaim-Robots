@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use bevy_simple_tilemap::plugin::SimpleTileMapPlugin;
+use common::CommonPlugin;
 use map::MapPlugin;
 use robot::RobotPlugin;
 use ui::UiPlugin;
@@ -14,6 +15,7 @@ fn main() {
         .add_plugins((
             DefaultPlugins,
             SimpleTileMapPlugin,
+            CommonPlugin,
             MapPlugin,
             RobotPlugin,
             UiPlugin,

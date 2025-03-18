@@ -1,3 +1,4 @@
+use crate::common::Score;
 use crate::map::Map;
 use bevy::prelude::*;
 
@@ -5,8 +6,27 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, pan_view);
+        app.add_systems(Startup, setup);
+        app.add_systems(Update, (pan_view, update));
     }
+}
+
+#[derive(Component)]
+struct ScoreDisplay;
+
+fn setup(mut commands: Commands) {
+    commands.spawn((
+        ScoreDisplay,
+        Text::new(format!("Score: {}", 0)),
+        TextFont {
+            font_size: 24.0,
+            ..Default::default()
+        },
+    ));
+}
+
+fn update(score: Res<Score>, mut score_display: Single<&mut Text, With<ScoreDisplay>>) {
+    score_display.0 = format!("Score: {}", score.0);
 }
 
 fn pan_view(
