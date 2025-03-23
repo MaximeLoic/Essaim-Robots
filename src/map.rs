@@ -1,4 +1,4 @@
-use crate::common::{Collider, GameResource, Obstacle};
+use crate::common::{Collider, GameResource, Obstacle, ResourceType};
 use bevy::math::{
     bounding::{Aabb2d, BoundingCircle, IntersectsVolume},
     ivec3, vec2,
@@ -189,14 +189,34 @@ fn spawn_resources(
 
         // Si pas de collision, placer la ressource
         if !collision {
+            let (kind, color, mesh, points) = match rng.gen_range(0..3) {
+                0 => (
+                    ResourceType::Energy,
+                    Color::srgb(1.0, 1.0, 0.0),
+                    Mesh2d(meshes.add(Circle::new(RESOURCE_SIZE))),
+                    5,
+                ),
+                1 => (
+                    ResourceType::Mineral,
+                    Color::srgb(0.5, 0.5, 0.5),
+                    Mesh2d(meshes.add(Rectangle::new(RESOURCE_SIZE * 2.0, RESOURCE_SIZE * 2.0))),
+                    3,
+                ),
+                _ => (
+                    ResourceType::Scientific,
+                    Color::srgb(0.0, 0.0, 1.0),
+                    Mesh2d(meshes.add(RegularPolygon::new(RESOURCE_SIZE, 3))),
+                    1,
+                ), 
+            };
             commands.spawn((
-                GameResource,
+                GameResource{kind, points},
                 Collider {
                     bounding_box: Aabb2d::new(vec2(x, y), vec2(RESOURCE_SIZE, RESOURCE_SIZE)),
                 },
                 Transform::from_xyz(x, y, 0.5),
-                Mesh2d(meshes.add(Circle::new(RESOURCE_SIZE))),
-                MeshMaterial2d(materials.add(Color::hsla(36.0, 1.0, 0.5, 1.0))),
+                mesh,
+                MeshMaterial2d(materials.add(color)),
             ));
 
             resources_placed += 1;

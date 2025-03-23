@@ -18,8 +18,17 @@ pub struct Collider {
 #[derive(Component)]
 pub struct Obstacle;
 
+#[derive(Component, Clone, Copy, PartialEq, Debug)]
+pub enum ResourceType {
+    Energy,
+    Mineral,
+    Scientific,
+}
 #[derive(Component)]
-pub struct GameResource;
+pub struct GameResource{
+    pub kind: ResourceType,
+    pub points: u32,
+}
 
 #[derive(Resource)]
 pub struct Score(pub u32);
