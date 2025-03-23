@@ -5,7 +5,7 @@ use crate::{
 use bevy::{
     math::{
         bounding::{BoundingCircle, IntersectsVolume},
-        vec2,
+        vec2, vec3,
     },
     prelude::*,
 };
@@ -30,6 +30,7 @@ pub struct Robot {
     pub radius: f32,
     pub speed: f32,
     pub max_turn_rate: f32,
+    pub max_deviation: f32,
 }
 
 #[derive(Component)]
@@ -72,6 +73,7 @@ fn spawn_robots(
                     radius: 5.0,
                     speed: 70.0,
                     max_turn_rate: 5.0,
+                    max_deviation: f32::consts::FRAC_PI_2,
                 },
             ))
             .with_child((
@@ -94,6 +96,7 @@ fn spawn_robots(
                     radius: 10.0,
                     speed: 50.0,
                     max_turn_rate: 20.0,
+                    max_deviation: f32::consts::FRAC_PI_2,
                 },
             ))
             .with_child((
@@ -148,9 +151,7 @@ fn check_collisions(
 ) {
     let mut rng = rand::thread_rng();
 
-    for (transform, mut robot) in robots_query.iter_mut() {
-        let mut colliding_obstacle: Option<&Collider> = None;
-
+    for (mut transform, mut robot) in robots_query.iter_mut() {
         // Position actuelle
         let current_pos = vec2(transform.translation.x, transform.translation.y);
 
@@ -163,20 +164,31 @@ fn check_collisions(
 
         // Vérifier les collisions à la nouvelle position
         let robot_bounding_circle = BoundingCircle::new(new_pos, robot.radius);
+        let mut collision_detected = false;
 
         for obstacle_collider in &obstacles_query {
             if robot_bounding_circle.intersects(&obstacle_collider.bounding_box) {
-                colliding_obstacle = Some(obstacle_collider);
+                collision_detected = true;
                 break;
             }
         }
 
-        if let Some(_) = colliding_obstacle {
-            robot.direction += rng.gen_range((f32::consts::PI * 0.75)..(f32::consts::PI * 1.25));
+        if collision_detected {
+            transform.translation = vec3(current_pos.x, current_pos.y, 1.0);
+            // Choisir une nouvelle direction aléatoire
+            // Générer un angle de déviation dans la plage [-max_deviation, max_deviation]
+            let angle_change = rng.gen_range(-robot.max_deviation..robot.max_deviation);
+
+            // Appliquer la déviation à la direction actuelle
+            robot.direction = (robot.direction + angle_change) % std::f32::consts::TAU;
+
+            // Assurer que la direction reste dans l'intervalle [0, TAU]
+            if robot.direction < 0.0 {
+                robot.direction += std::f32::consts::TAU;
+            }
         }
     }
 }
-
 fn collect_resource(
     mut commands: Commands,
     mut resources_query: Query<(Entity, &Collider), With<GameResource>>,
