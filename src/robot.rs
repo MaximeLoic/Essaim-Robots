@@ -1,11 +1,11 @@
 use crate::{
-    common::{Collider, GameResource, Obstacle, ResourceCollectedEvent},
+    common::{Collider, DiscoveredResources, GameResource, Obstacle, ResourceCollectedEvent},
     map::Map,
 };
 use bevy::{
     math::{
-        bounding::{BoundingCircle, IntersectsVolume},
-        vec2, vec3,
+        bounding::{BoundingCircle, BoundingVolume, IntersectsVolume},
+        vec2,
     },
     prelude::*,
 };
@@ -95,7 +95,7 @@ fn spawn_robots(
                     direction: 0.0,
                     radius: 10.0,
                     speed: 50.0,
-                    max_turn_rate: 20.0,
+                    max_turn_rate: 10.0,
                     max_deviation: f32::consts::FRAC_PI_2,
                 },
             ))
@@ -109,8 +109,10 @@ fn spawn_robots(
     commands.insert_resource(sensor_material_resource);
 }
 
-fn seek(mut query: Query<(&mut Transform, &mut Robot)>, map: Single<&Map>, time: Res<Time>) {
+fn seek(mut query: Query<(&mut Transform, &mut Robot)>, time: Res<Time>, map: Single<&Map>) {
     let mut rng = rand::thread_rng();
+    let map_width = map.width as f32 * map.tile_size as f32;
+    let map_height = map.height as f32 * map.tile_size as f32;
 
     for (mut transform, mut robot) in query.iter_mut() {
         transform.translation.x += robot.direction.cos() * robot.speed * time.delta_secs();
@@ -121,10 +123,6 @@ fn seek(mut query: Query<(&mut Transform, &mut Robot)>, map: Single<&Map>, time:
             rng.gen_range(-robot.max_turn_rate..robot.max_turn_rate) * time.delta_secs();
 
         robot.direction += turn_amount;
-
-        // Limites de la carte pour éviter que le robot ne sorte
-        let map_width = map.width as f32 * map.tile_size as f32;
-        let map_height = map.height as f32 * map.tile_size as f32;
 
         // Rebondir sur les bords
         if transform.translation.x < robot.radius {
@@ -151,7 +149,7 @@ fn check_collisions(
 ) {
     let mut rng = rand::thread_rng();
 
-    for (mut transform, mut robot) in robots_query.iter_mut() {
+    for (transform, mut robot) in robots_query.iter_mut() {
         // Position actuelle
         let current_pos = vec2(transform.translation.x, transform.translation.y);
 
@@ -174,36 +172,46 @@ fn check_collisions(
         }
 
         if collision_detected {
-            transform.translation = vec3(current_pos.x, current_pos.y, 1.0);
-            // Choisir une nouvelle direction aléatoire
-            // Générer un angle de déviation dans la plage [-max_deviation, max_deviation]
-            let angle_change = rng.gen_range(-robot.max_deviation..robot.max_deviation);
-
-            // Appliquer la déviation à la direction actuelle
-            robot.direction = (robot.direction + angle_change) % std::f32::consts::TAU;
-
-            // Assurer que la direction reste dans l'intervalle [0, TAU]
-            if robot.direction < 0.0 {
-                robot.direction += std::f32::consts::TAU;
-            }
+            robot.direction += rng.gen_range(-robot.max_deviation..robot.max_deviation)
+                + if rng.gen_bool(0.5) {
+                    std::f32::consts::FRAC_PI_2
+                } else {
+                    -std::f32::consts::FRAC_PI_2
+                };
         }
     }
 }
 fn collect_resource(
     mut commands: Commands,
-    mut resources_query: Query<(Entity, &Collider), With<GameResource>>,
+    mut resources_query: Query<(Entity, &Collider, &GameResource)>,
     collectors: Query<(&Transform, &Robot), With<Collector>>,
     mut events: EventWriter<ResourceCollectedEvent>,
+    mut discovered_resources: ResMut<DiscoveredResources>,
 ) {
     for (robot_transform, robot) in &collectors {
-        for (resource_entity, resource_collider) in resources_query.iter_mut() {
+        for (resource_entity, resource_collider, resource) in resources_query.iter_mut() {
             let robot_bounding_circle = BoundingCircle::new(
                 vec2(robot_transform.translation.x, robot_transform.translation.y),
                 robot.radius,
             );
 
             if robot_bounding_circle.intersects(&resource_collider.bounding_box) {
-                events.send(ResourceCollectedEvent);
+                events.send(ResourceCollectedEvent {
+                    points: resource.points,
+                });
+
+                // Retirer la ressource de la liste des ressources découvertes si elle est présente
+                for idx in 0..discovered_resources.0.len() {
+                    let res = discovered_resources.0.get(idx).unwrap();
+                    if res.x == resource_collider.bounding_box.center().x
+                        && res.y == resource_collider.bounding_box.center().y
+                    {
+                        info!("Removed from discovered resources: {:?}", res);
+                        discovered_resources.0.remove(idx);
+                        break;
+                    }
+                }
+
                 commands.entity(resource_entity).despawn();
             }
         }
@@ -221,6 +229,7 @@ fn sense_resource(
     resources_query: Query<&Transform, (With<GameResource>, Without<Robot>)>,
     time: Res<Time>,
     sensor_material: Res<SensorMaterial>,
+    mut discovered_resources: ResMut<DiscoveredResources>,
 ) {
     const ROTATION_SPEED: f32 = 2.0;
 
@@ -272,6 +281,24 @@ fn sense_resource(
 
                     robot.direction += rotation_amount;
                 } else if let Some(_) = explorer {
+                    // Vérifier si la ressource a déjà été découverte
+                    let mut already_discovered = false;
+                    for resource in &discovered_resources.0 {
+                        if resource.x == resource_transform.translation.x
+                            && resource.y == resource_transform.translation.y
+                        {
+                            already_discovered = true;
+                            break;
+                        }
+                    }
+                    if !already_discovered {
+                        discovered_resources.0.push(vec2(
+                            resource_transform.translation.x,
+                            resource_transform.translation.y,
+                        ));
+
+                        info!("New dicovery!: {:?}", discovered_resources.0);
+                    }
                 }
             } else {
                 *material = MeshMaterial2d(sensor_material.on.clone());

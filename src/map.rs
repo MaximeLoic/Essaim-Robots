@@ -68,8 +68,8 @@ fn setup(
 ) {
     const MAP_WIDTH: u32 = 250;
     const MAP_HEIGHT: u32 = 250;
-    const MAP_SCALE: f64 = 25.0;
-    const SEED: u32 = 5;
+    const MAP_SCALE: f64 = 15.0;
+    const SEED: u32 = 0;
     const TILE_SIZE: u32 = 16;
     const WINDOW_WIDTH: f32 = 1000.0;
     const WINDOW_HEIGHT: f32 = 800.0;
@@ -189,28 +189,25 @@ fn spawn_resources(
 
         // Si pas de collision, placer la ressource
         if !collision {
-            let (kind, color, mesh, points) = match rng.gen_range(0..3) {
+            let (game_resource, color, mesh) = match rng.gen_range(0..3) {
                 0 => (
-                    ResourceType::Energy,
+                    GameResource::new(ResourceType::Energy),
                     Color::srgb(1.0, 1.0, 0.0),
                     Mesh2d(meshes.add(Circle::new(RESOURCE_SIZE))),
-                    5,
                 ),
                 1 => (
-                    ResourceType::Mineral,
+                    GameResource::new(ResourceType::Mineral),
                     Color::srgb(0.5, 0.5, 0.5),
                     Mesh2d(meshes.add(Rectangle::new(RESOURCE_SIZE * 2.0, RESOURCE_SIZE * 2.0))),
-                    3,
                 ),
                 _ => (
-                    ResourceType::Scientific,
+                    GameResource::new(ResourceType::Scientific),
                     Color::srgb(0.0, 0.0, 1.0),
                     Mesh2d(meshes.add(RegularPolygon::new(RESOURCE_SIZE, 3))),
-                    1,
-                ), 
+                ),
             };
             commands.spawn((
-                GameResource{kind, points},
+                game_resource,
                 Collider {
                     bounding_box: Aabb2d::new(vec2(x, y), vec2(RESOURCE_SIZE, RESOURCE_SIZE)),
                 },
